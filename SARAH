@@ -1,0 +1,1756 @@
+import datetime
+import math
+import re
+import streamlit as st
+from streamlit_geolocation import streamlit_geolocation
+
+
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
+
+st.set_page_config(
+    page_title="SARAH",
+    page_icon="🏥",
+    layout="centered"
+)
+
+
+# ============================================================
+# ESTILO VISUAL — PRETO + DOURADO
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    .stApp {
+        background-color: #0d0d0d;
+        color: white;
+    }
+
+    h1, h2, h3 {
+        color: #FFD700 !important;
+    }
+
+    p, label, span, div {
+        color: white;
+    }
+
+    .stButton > button {
+        background-color: #FFD700;
+        color: #000000;
+        border: none;
+        border-radius: 10px;
+        font-weight: bold;
+        min-height: 48px;
+        transition: 0.2s;
+    }
+
+    .stButton > button:hover {
+        background-color: #e6c200;
+        color: #000000;
+    }
+
+    .titulo {
+        text-align: center;
+        color: #FFD700;
+        font-size: 42px;
+        font-weight: bold;
+    }
+
+    .subtitulo {
+        text-align: center;
+        color: #cccccc;
+        font-size: 18px;
+        margin-bottom: 30px;
+    }
+
+    .ficha {
+        background-color: #171717;
+        border: 1px solid #FFD700;
+        border-radius: 12px;
+        padding: 20px;
+        margin-top: 15px;
+    }
+
+    .rodape {
+        text-align: center;
+        color: #888888;
+        font-size: 12px;
+        margin-top: 30px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# BANCO DE HOSPITAIS
+# ============================================================
+
+HOSPITAIS = [
+    {
+        "nome": "Hospital Regional de Presidente Prudente (HR)",
+        "lat": -22.1225,
+        "lon": -51.3911,
+        "endereco": "Rua José Bongiovani, 1290 - Cidade Universitária",
+    },
+    {
+        "nome": "Santa Casa de Misericórdia de Presidente Prudente",
+        "lat": -22.1182,
+        "lon": -51.3855,
+        "endereco": "Rua Tenente Nicolau Maffei, 399 - Centro",
+    },
+    {
+        "nome": "UPA Zona Norte / Pronto Atendimento",
+        "lat": -22.1050,
+        "lon": -51.3800,
+        "endereco": "Unidade de atendimento de urgência municipal",
+    },
+]
+
+
+# ============================================================
+# CÁLCULO DE DISTÂNCIA
+# ============================================================
+
+def calcular_distancia(lat1, lon1, lat2, lon2):
+
+    raio_terra = 6371
+
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+
+    c = 2 * math.atan2(
+        math.sqrt(a),
+        math.sqrt(1 - a)
+    )
+
+    return raio_terra * c
+
+
+# ============================================================
+# ESTADO DA APLICAÇÃO
+# ============================================================
+
+if "historico" not in st.session_state:
+    st.session_state.historico = []
+
+if "pagina" not in st.session_state:
+    st.session_state.pagina = "menu"
+
+if "resultado" not in st.session_state:
+    st.session_state.resultado = None
+
+if "dados_triagem" not in st.session_state:
+    st.session_state.dados_triagem = None
+
+
+# ============================================================
+# FUNÇÕES DE NAVEGAÇÃO
+# ============================================================
+
+def ir_para(pagina):
+
+    st.session_state.pagina = pagina
+    st.rerun()
+
+
+def voltar_menu():
+
+    historico = st.session_state.historico
+
+    st.session_state.clear()
+
+    st.session_state.historico = historico
+    st.session_state.pagina = "menu"
+    st.session_state.resultado = None
+    st.session_state.dados_triagem = None
+
+    st.rerun()
+
+
+# ============================================================
+# NORMALIZAÇÃO DE TEXTO
+# ============================================================
+
+def normalizar_texto(texto):
+
+    texto = texto.lower().strip()
+
+    substituicoes = {
+        "á": "a",
+        "à": "a",
+        "ã": "a",
+        "â": "a",
+        "é": "e",
+        "ê": "e",
+        "í": "i",
+        "ó": "o",
+        "ô": "o",
+        "õ": "o",
+        "ú": "u",
+        "ç": "c",
+    }
+
+    for antigo, novo in substituicoes.items():
+        texto = texto.replace(antigo, novo)
+
+    return texto
+
+
+# ============================================================
+# DETECÇÃO MAIS SEGURA DE SINTOMAS
+# ============================================================
+
+def possui_sintoma(texto, sintoma):
+
+    texto = normalizar_texto(texto)
+    sintoma = normalizar_texto(sintoma)
+
+    # Expressões que indicam ausência do sintoma.
+    negativas = [
+        f"nao tenho {sintoma}",
+        f"nao estou com {sintoma}",
+        f"sem {sintoma}",
+        f"nao sinto {sintoma}",
+        f"nao apresento {sintoma}",
+        f"nega {sintoma}",
+    ]
+
+    for negativa in negativas:
+
+        if negativa in texto:
+            return False
+
+    return sintoma in texto
+
+
+# ============================================================
+# FUNÇÃO PARA VERIFICAR SINTOMA
+# ============================================================
+
+def sintoma_presente(texto, selecionados, sintoma):
+
+    texto_presente = possui_sintoma(
+        texto,
+        sintoma
+    )
+
+    selecionado = (
+        normalizar_texto(sintoma)
+        in [
+            normalizar_texto(s)
+            for s in selecionados
+        ]
+    )
+
+    return texto_presente or selecionado
+
+
+# ============================================================
+# ANÁLISE DE SINAIS VITAIS
+# ============================================================
+
+def analisar_sinais_vitais(
+    idade_anos,
+    temperatura,
+    pressao_sistolica,
+    pressao_diastolica,
+    frequencia_cardiaca,
+    spo2
+):
+
+    alertas = []
+
+    # --------------------------------------------------------
+    # TEMPERATURA
+    # --------------------------------------------------------
+
+    if temperatura is not None:
+
+        if temperatura >= 39.5:
+
+            alertas.append(
+                "Temperatura corporal elevada."
+            )
+
+        elif temperatura < 35.0:
+
+            alertas.append(
+                "Temperatura corporal abaixo do esperado."
+            )
+
+    # --------------------------------------------------------
+    # SATURAÇÃO
+    # --------------------------------------------------------
+
+    if spo2 is not None:
+
+        if spo2 < 90:
+
+            alertas.append(
+                "Saturação de oxigênio muito baixa."
+            )
+
+        elif spo2 < 94:
+
+            alertas.append(
+                "Saturação de oxigênio abaixo do valor de referência utilizado pelo protótipo."
+            )
+
+    # --------------------------------------------------------
+    # PRESSÃO ARTERIAL
+    # --------------------------------------------------------
+
+    if pressao_sistolica is not None:
+
+        if pressao_sistolica < 90:
+
+            alertas.append(
+                "Pressão sistólica baixa."
+            )
+
+        elif pressao_sistolica >= 180:
+
+            alertas.append(
+                "Pressão sistólica muito elevada."
+            )
+
+    if pressao_diastolica is not None:
+
+        if pressao_diastolica >= 120:
+
+            alertas.append(
+                "Pressão diastólica muito elevada."
+            )
+
+    # --------------------------------------------------------
+    # FREQUÊNCIA CARDÍACA
+    # --------------------------------------------------------
+
+    if frequencia_cardiaca is not None:
+
+        if frequencia_cardiaca < 50:
+
+            alertas.append(
+                "Frequência cardíaca abaixo da faixa utilizada pelo protótipo."
+            )
+
+        elif frequencia_cardiaca > 120:
+
+            alertas.append(
+                "Frequência cardíaca elevada."
+            )
+
+    return alertas
+
+
+# ============================================================
+# FUNÇÃO PRINCIPAL DE ANÁLISE
+# ============================================================
+
+def analisar_triagem(
+    sintomas_texto,
+    sintomas_selecionados,
+    idade_anos,
+    imc,
+    doenca_cronica,
+    usa_medicamento,
+    temperatura=None,
+    pressao_sistolica=None,
+    pressao_diastolica=None,
+    frequencia_cardiaca=None,
+    spo2=None
+):
+
+    texto = sintomas_texto
+
+    score = 0
+
+    observacoes = []
+
+    emergencia_direta = False
+
+    motivos_emergencia = []
+
+
+    # ========================================================
+    # SINTOMAS
+    # ========================================================
+
+    sintomas_leves = {
+        "febre": 1,
+        "tosse": 1,
+        "coriza": 1,
+        "dor de cabeça": 1,
+        "dor no corpo": 1,
+        "fadiga": 1,
+        "dor de garganta": 1,
+    }
+
+    sintomas_moderados = {
+        "manchas na pele": 2,
+        "coceira": 2,
+        "inchaço": 2,
+        "ínguas": 2,
+    }
+
+    sintomas_graves = {
+        "dor no peito": 5,
+        "falta de ar": 5,
+        "visão alterada": 4,
+    }
+
+
+    # ========================================================
+    # PONTUAÇÃO
+    # ========================================================
+
+    for sintoma, pontos in sintomas_leves.items():
+
+        if sintoma_presente(
+            texto,
+            sintomas_selecionados,
+            sintoma
+        ):
+
+            score += pontos
+
+
+    for sintoma, pontos in sintomas_moderados.items():
+
+        if sintoma_presente(
+            texto,
+            sintomas_selecionados,
+            sintoma
+        ):
+
+            score += pontos
+
+
+    for sintoma, pontos in sintomas_graves.items():
+
+        if sintoma_presente(
+            texto,
+            sintomas_selecionados,
+            sintoma
+        ):
+
+            score += pontos
+
+
+    # ========================================================
+    # SINAIS DE ALERTA DIRETO
+    # ========================================================
+
+    sinais_criticos = [
+        (
+            "dor no peito",
+            "Dor no peito relatada."
+        ),
+        (
+            "falta de ar",
+            "Falta de ar relatada."
+        ),
+        (
+            "visão alterada",
+            "Alteração visual relatada."
+        ),
+    ]
+
+    for sintoma, motivo in sinais_criticos:
+
+        if sintoma_presente(
+            texto,
+            sintomas_selecionados,
+            sintoma
+        ):
+
+            emergencia_direta = True
+            motivos_emergencia.append(motivo)
+
+
+    # ========================================================
+    # COMBINAÇÕES
+    # ========================================================
+
+    febre = sintoma_presente(
+        texto,
+        sintomas_selecionados,
+        "febre"
+    )
+
+    dor_corpo = sintoma_presente(
+        texto,
+        sintomas_selecionados,
+        "dor no corpo"
+    )
+
+    tosse = sintoma_presente(
+        texto,
+        sintomas_selecionados,
+        "tosse"
+    )
+
+
+    if febre and dor_corpo:
+
+        score += 1
+
+        observacoes.append(
+            "Combinação de sintomas identificada."
+        )
+
+
+    if febre and tosse:
+
+        score += 1
+
+        observacoes.append(
+            "Febre associada à tosse identificada."
+        )
+
+
+    # ========================================================
+    # SINAIS VITAIS
+    # ========================================================
+
+    alertas_vitais = analisar_sinais_vitais(
+        idade_anos,
+        temperatura,
+        pressao_sistolica,
+        pressao_diastolica,
+        frequencia_cardiaca,
+        spo2
+    )
+
+
+    observacoes.extend(alertas_vitais)
+
+
+    # Valores considerados críticos pelo protótipo.
+    # Eles não representam um protocolo médico oficial.
+
+    if spo2 is not None and spo2 < 90:
+
+        emergencia_direta = True
+
+        motivos_emergencia.append(
+            "Saturação de oxigênio muito baixa."
+        )
+
+
+    if pressao_sistolica is not None and pressao_sistolica < 80:
+
+        emergencia_direta = True
+
+        motivos_emergencia.append(
+            "Pressão sistólica muito baixa."
+        )
+
+
+    # ========================================================
+    # CLASSIFICAÇÃO BASE
+    # ========================================================
+
+    if emergencia_direta or score >= 6:
+
+        prioridade = "Vermelho"
+        simbolo = "🔴"
+        titulo = "ATENÇÃO IMEDIATA"
+
+        orientacao = (
+            "Procure atendimento de emergência imediatamente. "
+            "Em situações graves, acione o SAMU pelo 192."
+        )
+
+    elif score >= 3:
+
+        prioridade = "Amarelo"
+        simbolo = "🟡"
+        titulo = "NECESSITA AVALIAÇÃO"
+
+        orientacao = (
+            "Recomenda-se procurar uma unidade de saúde "
+            "para avaliação profissional."
+        )
+
+    else:
+
+        prioridade = "Verde"
+        simbolo = "🟢"
+        titulo = "BAIXA PRIORIDADE"
+
+        orientacao = (
+            "Monitore os sintomas e procure atendimento "
+            "se houver piora ou persistência."
+        )
+
+
+    # ========================================================
+    # IDADE
+    # ========================================================
+
+    if idade_anos < 1:
+
+        observacoes.append(
+            "Paciente com menos de 1 ano: faixa etária que requer atenção adicional."
+        )
+
+        if prioridade == "Verde":
+
+            prioridade = "Amarelo"
+            simbolo = "🟡"
+            titulo = "NECESSITA AVALIAÇÃO"
+
+
+    elif idade_anos < 5:
+
+        observacoes.append(
+            "Criança pequena: faixa etária que requer atenção adicional."
+        )
+
+        if prioridade == "Verde":
+
+            prioridade = "Amarelo"
+            simbolo = "🟡"
+            titulo = "NECESSITA AVALIAÇÃO"
+
+
+    elif idade_anos >= 60:
+
+        observacoes.append(
+            "Pessoa idosa: faixa etária que requer atenção adicional."
+        )
+
+        if prioridade == "Verde":
+
+            prioridade = "Amarelo"
+            simbolo = "🟡"
+            titulo = "NECESSITA AVALIAÇÃO"
+
+
+    # ========================================================
+    # DOENÇA CRÔNICA
+    # ========================================================
+
+    if doenca_cronica:
+
+        observacoes.append(
+            "Paciente informou possuir condição crônica."
+        )
+
+        if prioridade == "Verde":
+
+            prioridade = "Amarelo"
+            simbolo = "🟡"
+            titulo = "NECESSITA AVALIAÇÃO"
+
+
+    # ========================================================
+    # MEDICAMENTOS
+    # ========================================================
+
+    if usa_medicamento:
+
+        observacoes.append(
+            "Paciente informou uso contínuo de medicamentos."
+        )
+
+
+    # ========================================================
+    # IMC
+    # ========================================================
+
+    classificacao_imc = None
+
+    if imc is not None:
+
+        # ----------------------------------------------------
+        # CRIANÇAS E ADOLESCENTES
+        # ----------------------------------------------------
+
+        if idade_anos < 20:
+
+            classificacao_imc = (
+                "IMC registrado. Para menores de 20 anos, "
+                "a interpretação adequada depende de idade, sexo "
+                "e curvas de crescimento/percentis."
+            )
+
+            observacoes.append(
+                "O IMC não foi utilizado como classificação "
+                "clínica automática por se tratar de paciente "
+                "com menos de 20 anos."
+            )
+
+        # ----------------------------------------------------
+        # ADULTOS
+        # ----------------------------------------------------
+
+        else:
+
+            if imc >= 40:
+
+                classificacao_imc = (
+                    "IMC muito elevado."
+                )
+
+                observacoes.append(
+                    "IMC muito elevado: o dado deve ser considerado "
+                    "junto aos demais fatores clínicos."
+                )
+
+                # IMC muito elevado não transforma sozinho
+                # um caso em emergência.
+                # Porém, impede que o caso permaneça Verde.
+
+                if prioridade == "Verde":
+
+                    prioridade = "Amarelo"
+                    simbolo = "🟡"
+                    titulo = "NECESSITA AVALIAÇÃO"
+
+
+            elif imc >= 30:
+
+                classificacao_imc = (
+                    "IMC acima da faixa de referência para adultos."
+                )
+
+                observacoes.append(
+                    "IMC acima da faixa de referência para adultos."
+                )
+
+
+            elif imc < 18.5:
+
+                classificacao_imc = (
+                    "IMC abaixo da faixa de referência para adultos."
+                )
+
+                observacoes.append(
+                    "IMC abaixo da faixa de referência para adultos."
+                )
+
+
+            else:
+
+                classificacao_imc = (
+                    "IMC dentro da faixa de referência utilizada "
+                    "para adultos."
+                )
+
+
+    # ========================================================
+    # PROPORÇÃO PESO / ALTURA
+    # ========================================================
+
+    indicador_proporcional = None
+
+    if idade_anos >= 20 and imc is not None:
+
+        if imc >= 50:
+
+            indicador_proporcional = (
+                "Relação peso-altura extremamente elevada."
+            )
+
+            observacoes.append(
+                "A relação entre peso e altura apresenta "
+                "valor extremamente elevado."
+            )
+
+            if prioridade == "Verde":
+
+                prioridade = "Amarelo"
+                simbolo = "🟡"
+                titulo = "NECESSITA AVALIAÇÃO"
+
+
+        elif imc >= 40:
+
+            indicador_proporcional = (
+                "Relação peso-altura muito elevada."
+            )
+
+
+    # ========================================================
+    # RESULTADO
+    # ========================================================
+
+    return {
+        "score": score,
+        "prioridade": prioridade,
+        "simbolo": simbolo,
+        "titulo": titulo,
+        "orientacao": orientacao,
+        "observacoes": observacoes,
+        "motivos_emergencia": motivos_emergencia,
+        "classificacao_imc": classificacao_imc,
+        "indicador_proporcional": indicador_proporcional,
+    }
+
+
+# ============================================================
+# MENU PRINCIPAL
+# ============================================================
+
+if st.session_state.pagina == "menu":
+
+    st.markdown(
+        '<div class="titulo">🤖 SARAH</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        '<div class="subtitulo">'
+        'Sistema de Apoio e Resposta Rápida ao Atendimento Hospitalar'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+    st.write("")
+
+    if st.button(
+        "🟡 INICIAR ATENDIMENTO",
+        use_container_width=True
+    ):
+
+        ir_para("triagem")
+
+
+    st.write("")
+
+
+    if st.button(
+        "📊 VER HISTÓRICO",
+        use_container_width=True
+    ):
+
+        ir_para("historico")
+
+
+    st.markdown(
+        '<div class="rodape">'
+        'Sistema experimental de apoio à triagem — '
+        'não substitui avaliação médica.'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+
+# ============================================================
+# TRIAGEM
+# ============================================================
+
+elif st.session_state.pagina == "triagem":
+
+    st.title("Nova Triagem")
+
+    st.subheader("Dados do paciente")
+
+
+    nome = st.text_input(
+        "Nome",
+        placeholder="Digite o nome do paciente"
+    )
+
+
+    # ========================================================
+    # IDADE
+    # ========================================================
+
+    unidade_idade = st.selectbox(
+        "Unidade da idade",
+        ["Anos", "Meses"]
+    )
+
+
+    idade_valor = st.number_input(
+        "Idade",
+        min_value=0,
+        max_value=120 if unidade_idade == "Anos" else 239,
+        value=0,
+        step=1
+    )
+
+
+    if unidade_idade == "Meses":
+
+        idade_anos = idade_valor / 12
+
+    else:
+
+        idade_anos = float(idade_valor)
+
+
+    col1, col2 = st.columns(2)
+
+
+    with col1:
+
+        peso = st.number_input(
+            "Peso (kg)",
+            min_value=0.0,
+            max_value=500.0,
+            value=0.0,
+            step=0.1
+        )
+
+
+    with col2:
+
+        altura = st.number_input(
+            "Altura (m)",
+            min_value=0.0,
+            max_value=2.80,
+            value=0.0,
+            step=0.01
+        )
+
+
+    # ========================================================
+    # SINAIS VITAIS
+    # ========================================================
+
+    st.subheader("Sinais vitais")
+
+    st.caption(
+        "Campos opcionais. Quando disponíveis, os valores ajudam "
+        "o protótipo a analisar melhor a situação."
+    )
+
+
+    col1, col2 = st.columns(2)
+
+
+    with col1:
+
+        temperatura = st.number_input(
+            "Temperatura (°C)",
+            min_value=0.0,
+            max_value=45.0,
+            value=0.0,
+            step=0.1
+        )
+
+
+    with col2:
+
+        spo2 = st.number_input(
+            "Saturação de O₂ (%)",
+            min_value=0,
+            max_value=100,
+            value=0,
+            step=1
+        )
+
+
+    col1, col2 = st.columns(2)
+
+
+    with col1:
+
+        pressao_sistolica = st.number_input(
+            "Pressão sistólica (mmHg)",
+            min_value=0,
+            max_value=300,
+            value=0,
+            step=1
+        )
+
+
+    with col2:
+
+        pressao_diastolica = st.number_input(
+            "Pressão diastólica (mmHg)",
+            min_value=0,
+            max_value=200,
+            value=0,
+            step=1
+        )
+
+
+    frequencia_cardiaca = st.number_input(
+        "Frequência cardíaca (bpm)",
+        min_value=0,
+        max_value=250,
+        value=0,
+        step=1
+    )
+
+
+    # ========================================================
+    # SINTOMAS
+    # ========================================================
+
+    st.subheader("Sintomas")
+
+
+    sintomas = st.text_area(
+        "Descreva os sintomas",
+        placeholder=(
+            "Exemplo: estou com febre e dor no corpo..."
+        )
+    )
+
+
+    opcoes = st.multiselect(
+        "Selecione os sintomas apresentados:",
+        [
+            "Febre",
+            "Tosse",
+            "Coriza",
+            "Dor de cabeça",
+            "Dor no corpo",
+            "Fadiga",
+            "Dor de garganta",
+            "Manchas na pele",
+            "Coceira",
+            "Inchaço",
+            "Ínguas",
+            "Dor no peito",
+            "Falta de ar",
+            "Visão alterada",
+        ]
+    )
+
+
+    # ========================================================
+    # INFORMAÇÕES ADICIONAIS
+    # ========================================================
+
+    st.subheader("Informações adicionais")
+
+
+    col1, col2 = st.columns(2)
+
+
+    with col1:
+
+        doenca_cronica = st.checkbox(
+            "Possui doença crônica?"
+        )
+
+
+    with col2:
+
+        usa_medicamento = st.checkbox(
+            "Utiliza medicamentos continuamente?"
+        )
+
+
+    st.divider()
+
+
+    col1, col2 = st.columns(2)
+
+
+    # ========================================================
+    # ANALISAR
+    # ========================================================
+
+    with col1:
+
+        if st.button(
+            "ANALISAR TRIAGEM",
+            use_container_width=True
+        ):
+
+            # ------------------------------------------------
+            # VALIDAÇÕES
+            # ------------------------------------------------
+
+            erro = None
+
+
+            if not nome.strip():
+
+                erro = (
+                    "Digite o nome do paciente antes de continuar."
+                )
+
+
+            elif idade_valor == 0:
+
+                erro = (
+                    "Informe a idade do paciente."
+                )
+
+
+            elif peso <= 0:
+
+                erro = (
+                    "Informe um peso válido."
+                )
+
+
+            elif altura <= 0:
+
+                erro = (
+                    "Informe uma altura válida."
+                )
+
+
+            elif not sintomas.strip() and not opcoes:
+
+                erro = (
+                    "Informe ou selecione pelo menos um sintoma."
+                )
+
+
+            if erro:
+
+                st.error(erro)
+
+
+            else:
+
+                # ------------------------------------------------
+                # IMC
+                # ------------------------------------------------
+
+                imc = peso / (altura ** 2)
+
+
+                # ------------------------------------------------
+                # SINAIS VITAIS
+                # ------------------------------------------------
+
+                temperatura_final = (
+                    temperatura
+                    if temperatura > 0
+                    else None
+                )
+
+                spo2_final = (
+                    spo2
+                    if spo2 > 0
+                    else None
+                )
+
+                pressao_sistolica_final = (
+                    pressao_sistolica
+                    if pressao_sistolica > 0
+                    else None
+                )
+
+                pressao_diastolica_final = (
+                    pressao_diastolica
+                    if pressao_diastolica > 0
+                    else None
+                )
+
+                frequencia_final = (
+                    frequencia_cardiaca
+                    if frequencia_cardiaca > 0
+                    else None
+                )
+
+
+                # ------------------------------------------------
+                # ANÁLISE
+                # ------------------------------------------------
+
+                resultado = analisar_triagem(
+                    sintomas,
+                    opcoes,
+                    idade_anos,
+                    imc,
+                    doenca_cronica,
+                    usa_medicamento,
+                    temperatura_final,
+                    pressao_sistolica_final,
+                    pressao_diastolica_final,
+                    frequencia_final,
+                    spo2_final
+                )
+
+
+                # =================================================
+                # SALVAR TUDO NO SESSION STATE
+                # =================================================
+
+                st.session_state.resultado = resultado
+
+
+                st.session_state.dados_triagem = {
+
+                    "nome": nome,
+                    "idade_valor": idade_valor,
+                    "unidade_idade": unidade_idade,
+                    "idade_anos": idade_anos,
+                    "peso": peso,
+                    "altura": altura,
+                    "imc": imc,
+                    "temperatura": temperatura_final,
+                    "spo2": spo2_final,
+                    "pressao_sistolica": pressao_sistolica_final,
+                    "pressao_diastolica": pressao_diastolica_final,
+                    "frequencia_cardiaca": frequencia_final,
+                    "sintomas": sintomas,
+                    "opcoes": opcoes,
+                    "doenca_cronica": doenca_cronica,
+                    "usa_medicamento": usa_medicamento,
+                }
+
+
+                # =================================================
+                # HISTÓRICO
+                # =================================================
+
+                agora = datetime.datetime.now().strftime(
+                    "%d/%m/%Y %H:%M"
+                )
+
+
+                registro = {
+
+                    "nome": nome,
+
+                    "hora": agora,
+
+                    "idade": idade_anos,
+
+                    "prioridade":
+                        resultado["prioridade"],
+
+                    "score":
+                        resultado["score"],
+
+                    "imc":
+                        round(imc, 1),
+
+                }
+
+
+                st.session_state.historico.append(
+                    registro
+                )
+
+
+                st.success(
+                    "Triagem analisada com sucesso."
+                )
+
+
+    # ========================================================
+    # VOLTAR
+    # ========================================================
+
+    with col2:
+
+        if st.button(
+            "VOLTAR",
+            use_container_width=True
+        ):
+
+            voltar_menu()
+
+
+    # ========================================================
+    # RENDERIZAÇÃO DO RESULTADO
+    #
+    # IMPORTANTE:
+    # Fica FORA do botão ANALISAR.
+    # ========================================================
+
+    if st.session_state.resultado is not None:
+
+        resultado = st.session_state.resultado
+
+        dados = st.session_state.dados_triagem
+
+
+        st.divider()
+
+
+        # ====================================================
+        # FICHA
+        # ====================================================
+
+        st.subheader(
+            "FICHA DE ATENDIMENTO"
+        )
+
+
+        idade_exibicao = (
+            f"{dados['idade_valor']} "
+            f"{dados['unidade_idade'].lower()}"
+        )
+
+
+        st.markdown(
+            f"""
+            <div class="ficha">
+
+            <b>Paciente:</b> {dados['nome']}<br>
+            <b>Idade:</b> {idade_exibicao}<br>
+            <b>Peso:</b> {dados['peso']:.1f} kg<br>
+            <b>Altura:</b> {dados['altura']:.2f} m<br>
+            <b>IMC calculado:</b> {dados['imc']:.1f}
+
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+        # ====================================================
+        # SINAIS VITAIS
+        # ====================================================
+
+        st.write("### Sinais vitais")
+
+
+        if dados["temperatura"] is not None:
+
+            st.write(
+                f"**Temperatura:** "
+                f"{dados['temperatura']:.1f} °C"
+            )
+
+        else:
+
+            st.write(
+                "**Temperatura:** não informada"
+            )
+
+
+        if dados["spo2"] is not None:
+
+            st.write(
+                f"**SpO₂:** "
+                f"{dados['spo2']}%"
+            )
+
+        else:
+
+            st.write(
+                "**SpO₂:** não informada"
+            )
+
+
+        if dados["pressao_sistolica"] is not None:
+
+            st.write(
+                f"**Pressão arterial:** "
+                f"{dados['pressao_sistolica']}/"
+                f"{dados['pressao_diastolica']} mmHg"
+            )
+
+        else:
+
+            st.write(
+                "**Pressão arterial:** não informada"
+            )
+
+
+        if dados["frequencia_cardiaca"] is not None:
+
+            st.write(
+                f"**Frequência cardíaca:** "
+                f"{dados['frequencia_cardiaca']} bpm"
+            )
+
+        else:
+
+            st.write(
+                "**Frequência cardíaca:** não informada"
+            )
+
+
+        # ====================================================
+        # IMC
+        # ====================================================
+
+        st.write("### Indicador corporal")
+
+
+        if dados["idade_anos"] < 20:
+
+            st.info(
+                "Para menores de 20 anos, o IMC não é "
+                "interpretado pela classificação adulta. "
+                "A avaliação adequada depende de idade, "
+                "sexo e curvas de crescimento."
+            )
+
+        else:
+
+            st.write(
+                f"**IMC:** {dados['imc']:.1f}"
+            )
+
+
+        # ====================================================
+        # SINTOMAS
+        # ====================================================
+
+        st.write("### Sintomas informados")
+
+
+        if dados["opcoes"]:
+
+            for sintoma in dados["opcoes"]:
+
+                st.write(
+                    f"• {sintoma}"
+                )
+
+
+        if dados["sintomas"].strip():
+
+            st.write(
+                f"**Descrição:** "
+                f"{dados['sintomas']}"
+            )
+
+
+        st.divider()
+
+
+        # ====================================================
+        # RESULTADO
+        # ====================================================
+
+        st.subheader(
+            f"{resultado['simbolo']} "
+            f"{resultado['titulo']}"
+        )
+
+
+        st.write(
+            f"**Classificação:** "
+            f"{resultado['prioridade']}"
+        )
+
+
+        st.write(
+            f"**Pontuação interna:** "
+            f"{resultado['score']}"
+        )
+
+
+        st.write(
+            f"**Orientação:** "
+            f"{resultado['orientacao']}"
+        )
+
+
+        # ====================================================
+        # MOTIVOS DE EMERGÊNCIA
+        # ====================================================
+
+        if resultado["motivos_emergencia"]:
+
+            st.error(
+                "Fatores que acionaram o alerta de emergência:"
+            )
+
+            for motivo in resultado["motivos_emergencia"]:
+
+                st.write(
+                    f"• {motivo}"
+                )
+
+
+        # ====================================================
+        # INDICADOR DE RISCO
+        # ====================================================
+
+        risco = min(
+            resultado["score"] * 15,
+            100
+        )
+
+
+        st.write(
+            "### Indicador interno de triagem"
+        )
+
+
+        st.progress(risco)
+
+
+        st.caption(
+            f"Índice interno: {risco}%"
+        )
+
+
+        # ====================================================
+        # OBSERVAÇÕES
+        # ====================================================
+
+        if resultado["observacoes"]:
+
+            st.write(
+                "### Observações"
+            )
+
+
+            for observacao in resultado["observacoes"]:
+
+                st.write(
+                    f"• {observacao}"
+                )
+
+
+        # ====================================================
+        # EMERGÊNCIA
+        # ====================================================
+
+        if resultado["prioridade"] == "Vermelho":
+
+            st.error(
+                "POSSÍVEL SITUAÇÃO DE EMERGÊNCIA"
+            )
+
+
+            st.warning(
+                "Esta classificação é apenas um apoio "
+                "experimental à triagem e não substitui "
+                "uma avaliação profissional."
+            )
+
+
+            st.write(
+                "### Unidades próximas"
+            )
+
+
+            loc = streamlit_geolocation()
+
+
+            if (
+                loc
+                and loc.get("latitude") is not None
+                and loc.get("longitude") is not None
+            ):
+
+                user_lat = loc["latitude"]
+                user_lon = loc["longitude"]
+
+
+                hospitais_com_dados = []
+
+
+                for hospital in HOSPITAIS:
+
+                    distancia = calcular_distancia(
+                        user_lat,
+                        user_lon,
+                        hospital["lat"],
+                        hospital["lon"]
+                    )
+
+
+                    tempo = max(
+                        1,
+                        round(
+                            (distancia / 30) * 60
+                        )
+                    )
+
+
+                    hospitais_com_dados.append(
+                        (
+                            distancia,
+                            tempo,
+                            hospital
+                        )
+                    )
+
+
+                hospitais_com_dados.sort(
+                    key=lambda x: x[0]
+                )
+
+
+                for (
+                    distancia,
+                    tempo,
+                    hospital
+                ) in hospitais_com_dados[:2]:
+
+                    maps_url = (
+                        "https://www.google.com/maps/"
+                        "search/?api=1&query="
+                        f"{hospital['lat']},"
+                        f"{hospital['lon']}"
+                    )
+
+
+                    st.markdown(
+                        f"""
+                        🏥 **{hospital['nome']}**
+
+                        Distância aproximada:
+                        **{distancia:.1f} km**
+
+                        Tempo estimado:
+                        **~{tempo} min**
+
+                        {hospital['endereco']}
+
+                        [Abrir no Google Maps]({maps_url})
+                        """
+                    )
+
+
+                    st.divider()
+
+
+            else:
+
+                st.info(
+                    "Permita o acesso à localização "
+                    "para calcular as distâncias."
+                )
+
+
+                for hospital in HOSPITAIS:
+
+                    st.write(
+                        f"🏥 **{hospital['nome']}**"
+                    )
+
+                    st.caption(
+                        hospital["endereco"]
+                    )
+
+
+        elif resultado["prioridade"] == "Amarelo":
+
+            st.warning(
+                "NECESSITA DE AVALIAÇÃO"
+            )
+
+
+        else:
+
+            st.success(
+                "BAIXA PRIORIDADE"
+            )
+
+
+        # ====================================================
+        # AVISO EDUCACIONAL
+        # ====================================================
+
+        st.info(
+            "A SARAH é um protótipo educacional de apoio "
+            "à triagem. Ela não realiza diagnósticos médicos "
+            "e não substitui profissionais de saúde."
+        )
+
+
+# ============================================================
+# HISTÓRICO
+# ============================================================
+
+elif st.session_state.pagina == "historico":
+
+    st.title("📊 Histórico de Atendimentos")
+
+
+    if not st.session_state.historico:
+
+        st.info(
+            "Nenhum atendimento registrado."
+        )
+
+
+    else:
+
+        for item in reversed(
+            st.session_state.historico
+        ):
+
+            if item["prioridade"] == "Vermelho":
+
+                simbolo = "🔴"
+
+            elif item["prioridade"] == "Amarelo":
+
+                simbolo = "🟡"
+
+            else:
+
+                simbolo = "🟢"
+
+
+            with st.expander(
+                f"{simbolo} "
+                f"{item['nome']} — "
+                f"{item['prioridade']} — "
+                f"{item['hora']}"
+            ):
+
+                st.write(
+                    f"**Paciente:** "
+                    f"{item['nome']}"
+                )
+
+                st.write(
+                    f"**Idade:** "
+                    f"{item['idade']:.1f} anos"
+                )
+
+                st.write(
+                    f"**Horário:** "
+                    f"{item['hora']}"
+                )
+
+                st.write(
+                    f"**Classificação:** "
+                    f"{item['prioridade']}"
+                )
+
+                st.write(
+                    f"**Pontuação:** "
+                    f"{item['score']}"
+                )
+
+                st.write(
+                    f"**IMC:** "
+                    f"{item['imc']}"
+                )
+
+
+    st.divider()
+
+
+    if st.button(
+        "⬅️ VOLTAR AO MENU",
+        use_container_width=True
+    ):
+
+        voltar_menu()
+
+
+# ============================================================
+# RODAPÉ
+# ============================================================
+
+st.markdown(
+    """
+    <div class="rodape">
+    SARAH — Sistema de Apoio e Resposta Rápida ao Atendimento Hospitalar<br>
+    Protótipo desenvolvido para fins educacionais e científicos.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
